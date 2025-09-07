@@ -10,7 +10,7 @@ const PROMPT = `Your task is to act as a precision digital editing tool.
   3. Change the pose of the headshot in the image to Front view (upper body from chest up)
   4. The output must be a PNG image containing only the person on a white background. 
   EXPLICIT PROHIBITIONS:
-  1.  FORBIDDEN to change the skin color, race, or any facial features of the main subject in Image. 
+  1.  **FORBIDDEN** to change the skin color, race, or any facial features of the main subject in Image. 
   2.  **FORBIDDEN** to blend any characteristics of the main subject in Image with people in the reference images. 
   3.  **ABSOLUTELY IGNORE the identity of people in reference images: People in reference images are merely carriers/displays for the materials (hangers, models). 
   It is "STRICTLY FORBIDDEN" to copy, imitate, or reference any of their biological characteristics, including but not limited to: face, facial features, skin color, race, age, gender. 
