@@ -27,7 +27,7 @@
                     AI Headshot Cropper
                 </h1>
                 <p class="mt-3 text-lg text-zinc-500 max-w-xl mx-auto">
-                    Upload a photo, and our AI will automatically detect and crop the perfect headshot.
+                    Upload a photo, and our AI will automatically detect, crop, and remove the background for the perfect headshot.
                 </p>
             </header>
 
@@ -40,13 +40,13 @@
             <div id="result-view" class="w-full max-w-lg p-6 bg-white/80 rounded-xl shadow-2xl backdrop-blur-sm border border-zinc-200 flex-col items-center gap-6 hidden">
                 <div class="text-center">
                     <h2 class="text-2xl font-bold text-zinc-900">Your Headshot</h2>
-                    <p class="text-sm text-zinc-500 mt-1">Resized to 512x512 pixels</p>
+                    <p class="text-sm text-zinc-500 mt-1">Portrait (200x300 pixels) with background removed</p>
                 </div>
-                <div class="w-64 h-64 rounded-full overflow-hidden border-4 border-zinc-200 shadow-lg">
+                 <div class="w-48 h-72 rounded-lg overflow-hidden border-4 border-zinc-200 shadow-lg bg-gray-200" style="background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAACBJREFUOE9jZGBgEGHAD97/D0eMCIYwQDBgAGIUw2hQQgMAZG4CE3eTfYMAAAAASUVORK5CYII='); background-repeat: repeat;">
                     <img id="cropped-image" alt="Cropped Headshot" class="object-cover w-full h-full" />
                 </div>
                 <div class="flex items-center gap-4">
-                    <a id="download-link" href="#" download="headshot_512x512.png" class="px-6 py-3 bg-zinc-900 text-zinc-100 font-semibold rounded-lg shadow-md hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-500 focus:ring-opacity-75 transition-all transform hover:scale-105">
+                    <a id="download-link" href="#" download="headshot_200x300.png" class="px-6 py-3 bg-zinc-900 text-zinc-100 font-semibold rounded-lg shadow-md hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-500 focus:ring-opacity-75 transition-all transform hover:scale-105">
                         Download
                     </a>
                     <button id="reset-button" class="px-6 py-3 bg-white text-zinc-900 border border-zinc-300 font-semibold rounded-lg shadow-md hover:bg-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:ring-opacity-75 transition-transform transform hover:scale-105">

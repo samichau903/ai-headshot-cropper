@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, Modality } from "@google/genai";
 
 // --- STATE MANAGEMENT ---
 const state = {
@@ -10,27 +10,30 @@ const state = {
 };
 
 // --- DOM ELEMENTS ---
-let mainContainer, uploaderView, loaderView, resultView, errorContainer, errorMessage;
+let mainContainer, uploaderView, loaderView, loaderMessage, resultView, errorContainer, errorMessage;
 let dropzone, fileInput, previewImage, uploadPrompt, generateButton, resetButton, croppedImage, downloadLink;
 
-// --- GEMINI API SERVICE ---
+// --- CONSTANTS ---
+const HEADSHOT_WIDTH = 200;
+const HEADSHOT_HEIGHT = 300;
+const MIN_CROP_WIDTH = 300; // Min width from original image to ensure quality
+const MAX_API_DIMENSION = 1024; // Max dimension for analysis image
+
+
+// --- GEMINI API SERVICES ---
+
+/**
+ * Finds the most prominent face in an image and returns its bounding box.
+ */
 async function findHeadshot(base64Image, mimeType) {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
   try {
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
       contents: {
         parts: [
-          {
-            inlineData: {
-              data: base64Image.split(',')[1], // Remove the data URL prefix
-              mimeType: mimeType,
-            },
-          },
-          {
-            text: `Analyze the uploaded image. Your task is to identify the primary human face and provide its bounding box coordinates. Respond ONLY in JSON format. The coordinates must be integers and represent the top-left corner (x, y) and the dimensions (width, height) of the bounding box relative to the original image size.`,
-          },
+          { inlineData: { data: base64Image.split(',')[1], mimeType: mimeType } },
+          { text: `Analyze the image to find the most prominent person's face for a student headshot. Provide the bounding box from chin to top of hair. Focus on the main subject, even with a noisy background. Respond with only a JSON object containing integer coordinates: x, y, width, height.` },
         ],
       },
       config: {
@@ -47,118 +50,164 @@ async function findHeadshot(base64Image, mimeType) {
         },
       },
     });
-
-    const jsonString = response.text;
-    const parsedJson = JSON.parse(jsonString);
-
-    if (
-        typeof parsedJson.x !== 'number' ||
-        typeof parsedJson.y !== 'number' ||
-        typeof parsedJson.width !== 'number' ||
-        typeof parsedJson.height !== 'number'
-    ) {
-        throw new Error("Invalid bounding box data received from API.");
+    const parsedJson = JSON.parse(response.text);
+    if (typeof parsedJson.x !== 'number' || typeof parsedJson.y !== 'number' || typeof parsedJson.width !== 'number' || typeof parsedJson.height !== 'number') {
+      throw new Error("Invalid bounding box data received from API.");
     }
-
     return parsedJson;
-
   } catch (error) {
-    console.error("Error calling Gemini API:", error);
-    if (error instanceof Error) {
-        if (error.message.includes('API key not valid')) {
-            throw new Error('The API Key is invalid. Please ensure it is configured correctly in the environment.');
-        }
-        throw new Error(`Failed to find headshot: ${error.message}`);
+    console.error("Error calling Gemini API for face detection:", error);
+    if (error instanceof Error && error.message.includes('API key not valid')) {
+      throw new Error('The API Key is invalid. Please ensure it is configured correctly.');
     }
-    throw new Error("An unknown error occurred while analyzing the image.");
+    throw new Error(`Failed to find headshot: ${error.message || "Unknown API error."}`);
   }
 }
 
+/**
+ * Removes the background from an image, making it transparent.
+ */
+async function removeImageBackground(base64Image, mimeType) {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image-preview',
+      contents: {
+        parts: [
+          { inlineData: { data: base64Image.split(',')[1], mimeType: mimeType } },
+          { text: 'Isolate the main person from the background. Make the background fully transparent. The output should be only the resulting image with a transparent background.' },
+        ],
+      },
+      config: {
+        responseModalities: [Modality.IMAGE, Modality.TEXT],
+      },
+    });
+    for (const part of response.candidates[0].content.parts) {
+      if (part.inlineData) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
+    }
+    throw new Error("The AI did not return an image. It may have returned text instead: " + response.text);
+  } catch (error) {
+    console.error("Error removing background:", error);
+    throw new Error(`Failed to remove background: ${error.message}`);
+  }
+}
+
+
 // --- IMAGE UTILITIES ---
 
-const HEADSHOT_DIMENSION = 512; // The target size for the final headshot (e.g., 512x512 pixels).
+/**
+ * Resizes an image for API analysis, maintaining aspect ratio.
+ */
+function resizeForAnalysis(imageUrl, maxDimension) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const { naturalWidth: width, naturalHeight: height } = img;
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Could not get canvas context"));
+      let newWidth, newHeight;
+      if (width > height) {
+        newWidth = Math.min(width, maxDimension);
+        newHeight = Math.round((height * newWidth) / width);
+      } else {
+        newHeight = Math.min(height, maxDimension);
+        newWidth = Math.round((width * newHeight) / height);
+      }
+      canvas.width = newWidth;
+      canvas.height = newHeight;
+      ctx.drawImage(img, 0, 0, newWidth, newHeight);
+      const mimeType = imageUrl.substring(imageUrl.indexOf(":") + 1, imageUrl.indexOf(";"));
+      resolve({ resizedImageUrl: canvas.toDataURL(mimeType), width: newWidth, height: newHeight, mimeType });
+    };
+    img.onerror = () => reject(new Error("Failed to load image for resizing."));
+    img.src = imageUrl;
+  });
+}
 
 /**
- * Calculates a 1:1 aspect ratio headshot bounding box based on a face detection box.
- * This function takes the detected face and calculates a larger, square box
- * that is better suited for a headshot.
- * @param {object} faceBox - The bounding box of the detected face {x, y, width, height}.
- * @param {number} imageWidth - The width of the original image.
- * @param {number} imageHeight - The height of the original image.
- * @returns {object} The calculated bounding box for the headshot.
+ * Calculates a 2:3 portrait aspect ratio headshot box.
  */
 function createHeadshotBox(faceBox, imageWidth, imageHeight) {
-    // The ideal side length for the headshot square. 2x the face width is a good starting point.
-    const desiredSide = faceBox.width * 2;
+    const aspectRatio = HEADSHOT_WIDTH / HEADSHOT_HEIGHT;
     
-    // The final side length cannot be larger than the image itself.
-    const side = Math.min(desiredSide, imageWidth, imageHeight);
+    // A smaller multiplier makes the crop tighter, so the person appears larger.
+    let headshotHeight = faceBox.height * 2.0;
+    let headshotWidth = headshotHeight * aspectRatio;
 
-    // Center the crop box horizontally on the detected face.
-    let x = faceBox.x + faceBox.width / 2 - side / 2;
+    if (headshotWidth < MIN_CROP_WIDTH) {
+        headshotWidth = MIN_CROP_WIDTH;
+        headshotHeight = headshotWidth / aspectRatio;
+    }
 
-    // Center the crop box vertically, but shift it up slightly to give more headroom, typical for headshots.
-    let y = faceBox.y + faceBox.height / 2 - side / 2 - faceBox.height * 0.15;
+    if (headshotWidth > imageWidth) {
+        headshotWidth = imageWidth;
+        headshotHeight = headshotWidth / aspectRatio;
+    }
+    if (headshotHeight > imageHeight) {
+        headshotHeight = imageHeight;
+        headshotWidth = headshotHeight * aspectRatio;
+    }
 
-    // Clamp the top-left corner to ensure the final box stays within image boundaries.
-    x = Math.max(0, Math.min(x, imageWidth - side));
-    y = Math.max(0, Math.min(y, imageHeight - side));
+    let x = faceBox.x + faceBox.width / 2 - headshotWidth / 2;
+    // Position the box vertically. A smaller multiplier for the y-offset places
+    // the top of the head closer to the top of the frame.
+    // 0.05 results in ~5% headroom (e.g., 15px on a 300px tall image).
+    let y = faceBox.y - headshotHeight * 0.05;
 
-    return {
-        x: Math.round(x),
-        y: Math.round(y),
-        width: Math.round(side),
-        height: Math.round(side),
-    };
+    x = Math.max(0, Math.min(x, imageWidth - headshotWidth));
+    y = Math.max(0, Math.min(y, imageHeight - headshotHeight));
+
+    return { x: Math.round(x), y: Math.round(y), width: Math.round(headshotWidth), height: Math.round(headshotHeight) };
 }
 
 
 /**
- * Crops a portion of an image and resizes it to a target dimension.
- * @param {string} imageUrl - The data URL of the source image.
- * @param {object} box - The bounding box {x, y, width, height} to crop from the source image.
- * @param {number} targetSize - The width and height of the output image.
- * @returns {Promise<string>} A promise that resolves with the data URL of the cropped and resized image.
+ * Crops a portion of an image without resizing.
  */
-function cropAndResizeImage(imageUrl, box, targetSize) {
+function cropImage(imageUrl, box) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
       const canvas = document.createElement("canvas");
       const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        return reject(new Error("Could not get canvas context"));
-      }
-      
-      canvas.width = targetSize;
-      canvas.height = targetSize;
-      
-      // Draw the cropped portion of the source image onto the canvas, resizing it in the process.
-      ctx.drawImage(
-        img,
-        box.x,
-        box.y,
-        box.width,
-        box.height,
-        0,
-        0,
-        targetSize,
-        targetSize
-      );
-      
-      const resultDataUrl = canvas.toDataURL("image/png");
-      resolve(resultDataUrl);
+      if (!ctx) return reject(new Error("Could not get canvas context"));
+      canvas.width = box.width;
+      canvas.height = box.height;
+      ctx.drawImage(img, box.x, box.y, box.width, box.height, 0, 0, box.width, box.height);
+      const mimeType = imageUrl.substring(imageUrl.indexOf(":") + 1, imageUrl.indexOf(";"));
+      resolve({ imageDataUrl: canvas.toDataURL(mimeType), mimeType: mimeType });
     };
-    img.onerror = () => {
-      reject(new Error("Failed to load image for cropping and resizing."));
-    };
+    img.onerror = () => reject(new Error("Failed to load image for cropping."));
     img.src = imageUrl;
   });
 }
 
+/**
+ * Resizes an image to a final target size.
+ */
+function resizeFinalImage(imageUrl, targetWidth, targetHeight) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Could not get canvas context"));
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+      ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+      resolve(canvas.toDataURL("image/png")); // Output PNG for transparency
+    };
+    img.onerror = () => reject(new Error("Failed to load image for final resizing."));
+    img.src = imageUrl;
+  });
+}
+
+
 // --- UI UPDATE FUNCTION ---
 function render() {
-  // Error display
   if (state.error) {
     errorMessage.textContent = state.error;
     errorContainer.classList.remove('hidden');
@@ -166,7 +215,6 @@ function render() {
     errorContainer.classList.add('hidden');
   }
 
-  // Main view logic
   if (state.croppedImage) {
     mainContainer.classList.add('hidden');
     resultView.classList.remove('hidden');
@@ -186,7 +234,6 @@ function render() {
       loaderView.classList.add('hidden');
       loaderView.classList.remove('flex');
       uploaderView.classList.remove('hidden');
-      
       if (state.originalImageBase64) {
         previewImage.src = state.originalImageBase64;
         previewImage.classList.remove('hidden');
@@ -200,11 +247,11 @@ function render() {
     }
   }
 
-  // Disable buttons
   generateButton.disabled = state.isLoading;
   resetButton.disabled = state.isLoading;
   fileInput.disabled = state.isLoading;
 }
+
 
 // --- EVENT HANDLERS ---
 function handleImageSelect(file) {
@@ -230,30 +277,47 @@ async function handleCropRequest() {
     render();
     return;
   }
-
   state.isLoading = true;
   state.error = null;
   render();
 
   try {
-    // Get image dimensions by loading the image in memory
+    loaderMessage.textContent = 'Getting image dimensions...';
     const img = new Image();
     await new Promise((resolve, reject) => {
         img.onload = resolve;
         img.onerror = () => reject(new Error("Failed to load image to get dimensions."));
         img.src = state.originalImageBase64;
     });
-    const { naturalWidth: imageWidth, naturalHeight: imageHeight } = img;
-
-    // 1. Ask the AI to find the face in the image
-    const faceBox = await findHeadshot(state.originalImageBase64, state.file.type);
+    const { naturalWidth: originalWidth, naturalHeight: originalHeight } = img;
     
-    // 2. Use the face location to calculate a proper headshot crop
-    const headshotBox = createHeadshotBox(faceBox, imageWidth, imageHeight);
+    loaderMessage.textContent = 'Resizing for analysis...';
+    const { resizedImageUrl, width: resizedWidth, height: resizedHeight, mimeType } = await resizeForAnalysis(state.originalImageBase64, MAX_API_DIMENSION);
 
-    // 3. Perform the crop and resize on the original image using the calculated box
-    const croppedDataUrl = await cropAndResizeImage(state.originalImageBase64, headshotBox, HEADSHOT_DIMENSION);
-    state.croppedImage = croppedDataUrl;
+    loaderMessage.textContent = 'Detecting face...';
+    const faceBoxResized = await findHeadshot(resizedImageUrl, mimeType);
+    
+    const scaleFactorX = originalWidth / resizedWidth;
+    const scaleFactorY = originalHeight / resizedHeight;
+    const faceBoxOriginal = {
+        x: faceBoxResized.x * scaleFactorX,
+        y: faceBoxResized.y * scaleFactorY,
+        width: faceBoxResized.width * scaleFactorX,
+        height: faceBoxResized.height * scaleFactorY,
+    };
+    
+    const headshotBox = createHeadshotBox(faceBoxOriginal, originalWidth, originalHeight);
+
+    loaderMessage.textContent = 'Cropping headshot...';
+    const { imageDataUrl: initialCropUrl, mimeType: cropMimeType } = await cropImage(state.originalImageBase64, headshotBox);
+
+    loaderMessage.textContent = 'Removing background...';
+    const transparentImageUrl = await removeImageBackground(initialCropUrl, cropMimeType);
+
+    loaderMessage.textContent = 'Finalizing image...';
+    const finalImageUrl = await resizeFinalImage(transparentImageUrl, HEADSHOT_WIDTH, HEADSHOT_HEIGHT);
+    state.croppedImage = finalImageUrl;
+
   } catch (err) {
     console.error(err);
     const errorMessage = err instanceof Error ? err.message : "An unexpected error occurred.";
@@ -270,50 +334,27 @@ function handleReset() {
   state.croppedImage = null;
   state.error = null;
   state.isLoading = false;
-  fileInput.value = ''; // Reset file input
+  fileInput.value = '';
   render();
 }
 
 function setupEventListeners() {
     fileInput.addEventListener('change', (e) => handleImageSelect(e.target.files[0]));
-    
-    dropzone.addEventListener('dragenter', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (!state.isLoading) dropzone.classList.add('border-blue-400');
-    });
-    
-    dropzone.addEventListener('dragleave', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        dropzone.classList.remove('border-blue-400');
-    });
-
-    dropzone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-    });
-
+    dropzone.addEventListener('dragover', (e) => e.preventDefault());
     dropzone.addEventListener('drop', (e) => {
         e.preventDefault();
-        e.stopPropagation();
-        dropzone.classList.remove('border-blue-400');
-        if (!state.isLoading) {
-            handleImageSelect(e.dataTransfer.files[0]);
-        }
+        if (!state.isLoading) handleImageSelect(e.dataTransfer.files[0]);
     });
-
     generateButton.addEventListener('click', handleCropRequest);
     resetButton.addEventListener('click', handleReset);
 }
 
-
 // --- INITIALIZATION ---
 document.addEventListener('DOMContentLoaded', () => {
-    // Select all elements once the DOM is ready
     mainContainer = document.getElementById('main-container');
     uploaderView = document.getElementById('uploader-view');
     loaderView = document.getElementById('loader-view');
+    loaderMessage = document.getElementById('loader-message');
     resultView = document.getElementById('result-view');
     errorContainer = document.getElementById('error-container');
     errorMessage = document.getElementById('error-message');
@@ -327,5 +368,5 @@ document.addEventListener('DOMContentLoaded', () => {
     downloadLink = document.getElementById('download-link');
     
     setupEventListeners();
-    render(); // Initial render
+    render();
 });
