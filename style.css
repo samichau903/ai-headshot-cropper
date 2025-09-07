@@ -1,0 +1,23 @@
+body {
+    font-family: 'Inter', sans-serif;
+}
+
+/* Utility to hide elements. We use !important to override Tailwind's display properties if necessary. */
+.hidden {
+    display: none !important;
+}
+
+/* Spinner animation keyframes */
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Class to apply the animation to the spinner element */
+.spinner {
+    animation: spin 1s linear infinite;
+}

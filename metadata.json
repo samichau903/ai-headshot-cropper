@@ -1,0 +1,5 @@
+{
+  "name": "AI Headshot Cropper",
+  "description": "An intelligent tool to automatically detect, crop, and isolate student headshots from any uploaded picture using AI.",
+  "requestFramePermissions": []
+}
